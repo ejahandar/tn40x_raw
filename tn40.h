@@ -20,6 +20,13 @@
 #include <linux/ethtool.h>
 #include <linux/mii.h>
 #include <linux/crc32.h>
+#include <linux/wait.h>
+#include <linux/device.h>
+#include <linux/fs.h>
+#include <asm/uaccess.h>
+#include <linux/slab.h>
+#include <linux/spinlock.h>
+#include <linux/ioctl.h>
 #ifndef __VMKLNX__
 #include <linux/uaccess.h>
 #endif
@@ -123,6 +130,7 @@ u32  bdx_readl(void *base, u32 reg);
 
 #define TEHUTI_VID  		0x1FC9
 #define DLINK_VID  		0x1186
+
 
 /* Supported PHYs */
 
@@ -407,6 +415,7 @@ struct bdx_priv
     struct txf_fifo         	txf_fifo0;
     struct txdb     			txdb;
     int         				tx_level;
+	
     int         				tx_update_mark;
     int         				tx_noupd;
     spinlock_t      			tx_lock;    /* NETIF_F_LLTX mode */
@@ -441,8 +450,37 @@ struct bdx_priv
 	u32							errmsg_count;
 	u32							state;
 	// SHORT_PKT_FIX end
-    u32						advertising, autoneg;
+    u32							advertising, autoneg;
+	
+	// ebrahim
+	bool						rx_raw;
+	wait_queue_head_t 			tx_queue;
+	bool						tx_wait;
+	char * 						chrdev_tx_buffer;
+	char * 						chrdev_rx_buffer;
+	int  						chrdev_major;
+	int  						chrdev_minor;
+	bool 						chrdev_device_open;
+	struct device* 				chrdev_device; 	// The device-driver device struct pointe
+	spinlock_t					chrdev_write_lock;
+	spinlock_t					chrdev_read_lock;
 };
+
+
+//RAW Access defintions
+
+#define RAW_ACCESS_TRX_MAX_FRAMES	100
+#define RAW_ACCESS_MAX_FRAME_SIZE	1600
+#define RAW_ACCESS_BUFFER_SIZE		1024*1024*1	// 1MByte
+#define MAX_NO_ETH_ADAPTERS			4
+#define RAW_ACCESS_DEV_NAME			"ethraw"
+
+struct bulk_trx_d{
+	int no_frames;
+	short frame_size[RAW_ACCESS_TRX_MAX_FRAMES];
+	char frame_payload[RAW_ACCESS_TRX_MAX_FRAMES*RAW_ACCESS_MAX_FRAME_SIZE];
+};
+
 #define SPEED_5000 5000
 #define SPEED_2500 2500
 /*#define SUPPORTED_5000baseT_Full 5000
@@ -1003,4 +1041,5 @@ int bdx_mdio_look_for_phy(void __iomem *regs, int port);
 #ifndef vlan_tx_tag_get
 #define vlan_tx_tag_get skb_vlan_tag_get
 #endif
+
 #endif /* _TN40XX_H */
