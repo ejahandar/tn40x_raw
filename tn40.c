@@ -17,17 +17,6 @@
 
 #define DEBUG_ENABLE
 
-static struct file_operations chrdev_fops = {
-	.read = 	chrdev_read,
-	.write = 	chrdev_write,
-	.open = 	chrdev_open,
-	.release = 	chrdev_release
-};
-
-struct bdx_priv * adapter_priv[MAX_NO_ETH_ADAPTERS];
-static int raw_dev_major = -1;
-struct class *  chrdev_class; // The device class pointer (same for all raw ethernet devices)
-
 static void bdx_no_hotplug(void);
 
 uint bdx_force_no_phy_mode = 0;
@@ -51,6 +40,11 @@ __initdata DEFINE_SPINLOCK(g_lock) ;
 MODULE_DEVICE_TABLE(pci, bdx_pci_tbl);
 
 /* Definitions needed by RAW Access methods */
+
+struct bdx_priv * adapter_priv[MAX_NO_ETH_ADAPTERS];
+static int raw_dev_major = -1;
+struct class *  chrdev_class; // The device class pointer (same for all raw ethernet devices)
+
 ssize_t chrdev_write(struct file *filp, const char *buff, size_t len, loff_t * off);
 ssize_t chrdev_read(struct file *filp, char *buffer, size_t length, loff_t * offset);
 int chrdev_release(struct inode *inode, struct file *file);
@@ -62,6 +56,13 @@ void raw_access_deinit(void);
 
 int bdx_tx_transmit_raw(char * raw_data, int length, struct net_device *ndev);
 static inline void bdx_tx_map_raw(struct bdx_priv *priv, char * raw_data, int length, struct txd_desc *txdd);
+
+static struct file_operations chrdev_fops = {
+	.read = 	chrdev_read,
+	.write = 	chrdev_write,
+	.open = 	chrdev_open,
+	.release = 	chrdev_release
+};
 
 
 /* Definitions needed by ISR or NAPI functions */
@@ -853,7 +854,7 @@ static irqreturn_t bdx_isr_napi(int irq, void *dev)
     DBG("isr = 0x%x\n", isr);
     //  isr = READ_REG(priv, 0x5100);
     if (unlikely(!isr))
-    {
+  {
         bdx_enable_interrupts(priv);
         return IRQ_NONE;    /* Not our interrupt */
     }
@@ -870,18 +871,18 @@ static irqreturn_t bdx_isr_napi(int irq, void *dev)
         }
         else
         {
-            /*
-                         * NOTE: We get here if an interrupt has slept into
-                         *       the small time window between these lines in
-                         *       bdx_poll:
-             *   bdx_enable_interrupts(priv);
-             *   return 0;
-                         *
-             *   Currently interrupts are disabled (since we
-                         *   read the ISR register) and we have failed to
-                         *   register the next poll. So we read the regs to
-                         *   trigger the chip and allow further interrupts.
-                         */
+			/*
+			* NOTE: We get here if an interrupt has slept into
+			* the small time window between these lines in
+			* bdx_poll:
+			* bdx_enable_interrupts(priv);
+            * 	return 0;
+            *
+            * Currently interrupts are disabled (since we
+            * read the ISR register) and we have failed to
+			* register the next poll. So we read the regs to
+			* trigger the chip and allow further interrupts.
+			*/
             READ_REG(priv, regTXF_WPTR_0);
             READ_REG(priv, regRXD_WPTR_0);
         }
