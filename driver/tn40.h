@@ -399,6 +399,16 @@ struct bdx_phy_operations
         int  (*set_settings)(struct net_device *, struct ethtool_cmd *);
 };
 
+
+#define RAW_ACCESS_TRX_MAX_FRAMES	100
+#define RAW_ACCESS_MAX_FRAME_SIZE	1514
+
+struct bulk_trx_d{
+	int no_frames;
+	short frame_size[RAW_ACCESS_TRX_MAX_FRAMES];
+	char frame_payload[RAW_ACCESS_TRX_MAX_FRAMES][RAW_ACCESS_MAX_FRAME_SIZE];
+};
+
 struct bdx_priv
 {
     void __iomem            	*pBdxRegs;
@@ -455,34 +465,29 @@ struct bdx_priv
 	// ebrahim
 	bool						chrdev_initialized;
 	bool						rx_raw;
+	wait_queue_head_t 			rx_queue;
 	wait_queue_head_t 			tx_queue;
 	bool						tx_wait;
+	bool						rx_wait;
 	char * 						chrdev_tx_buffer;
-	char * 						chrdev_rx_buffer_A;
-	char * 						chrdev_rx_buffer_B;
-	char						chrdev_current_rx_buffer;
+	struct bulk_trx_d *			chrdev_rx_buffer_A;
+	struct bulk_trx_d *			chrdev_rx_buffer_B;
+	struct bulk_trx_d *			chrdev_current_rx_buffer;
 	int  						chrdev_major;
 	int  						chrdev_minor;
 	bool 						chrdev_device_open;
 	struct device* 				chrdev_device; 	// The device-driver device struct pointe
-	spinlock_t					chrdev_write_lock;
-	spinlock_t					chrdev_read_lock;
+	spinlock_t					chrdev_tx_lock;
+	spinlock_t					chrdev_rx_lock;
+	spinlock_t					chrdev_rxswap_lock;
 };
 
 
 //RAW Access defintions
 
-#define RAW_ACCESS_TRX_MAX_FRAMES	100
-#define RAW_ACCESS_MAX_FRAME_SIZE	1514
+
 #define MAX_NO_ETH_ADAPTERS			4
 #define RAW_ACCESS_DEV_NAME			"ethraw"
-
-struct bulk_trx_d{
-	int no_frames;
-	short frame_size[RAW_ACCESS_TRX_MAX_FRAMES];
-	char frame_payload[RAW_ACCESS_TRX_MAX_FRAMES][RAW_ACCESS_MAX_FRAME_SIZE];
-};
-
 #define RAW_ACCESS_BUFFER_SIZE		sizeof(struct bulk_trx_d)
 
 #define SPEED_5000 5000

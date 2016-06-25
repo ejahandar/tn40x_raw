@@ -44,14 +44,15 @@ struct bdx_priv * adapter_priv[MAX_NO_ETH_ADAPTERS];
 static int raw_dev_major = -1;
 struct class *  chrdev_class; // The device class pointer (same for all raw ethernet devices)
 
-ssize_t chrdev_write(struct file *filp, const char *buff, size_t len, loff_t * off);
-ssize_t chrdev_read(struct file *filp, char *buffer, size_t length, loff_t * offset);
-int chrdev_release(struct inode *inode, struct file *file);
-int chrdev_open(struct inode *inode, struct file *file);
-void chrdev_cleanup(struct bdx_priv *priv, char * name);
-int chrdev_init(struct bdx_priv *priv, char * name);
-void raw_access_init(void);
-void raw_access_deinit(void);
+static int bdx_rx_raw_get_quota(struct bdx_priv *priv);
+static ssize_t chrdev_write(struct file *filp, const char *buff, size_t len, loff_t * off);
+static ssize_t chrdev_read(struct file *filp, char *buffer, size_t length, loff_t * offset);
+static int chrdev_release(struct inode *inode, struct file *file);
+static int chrdev_open(struct inode *inode, struct file *file);
+static void chrdev_cleanup(struct bdx_priv *priv, char * name);
+static int chrdev_init(struct bdx_priv *priv, char * name);
+static void raw_access_init(void);
+static void raw_access_deinit(void);
 
 int bdx_tx_transmit_raw(char * raw_data, int length, struct net_device *ndev);
 static inline void bdx_tx_map_raw(struct bdx_priv *priv, char * raw_data, int length, struct txd_desc *txdd);
@@ -853,6 +854,7 @@ static irqreturn_t bdx_isr_napi(int irq, void *dev)
     ENTER;
     isr = READ_REG(priv, regISR_MSK0);
     DBG("isr = 0x%x\n", isr);
+	printk(KERN_ERR "xISR : %i\n", isr);
     //  isr = READ_REG(priv, 0x5100);
     if (unlikely(!isr))
   {
@@ -868,6 +870,7 @@ static irqreturn_t bdx_isr_napi(int irq, void *dev)
         if (likely(LUXOR__SCHEDULE_PREP(&priv->napi, ndev)))
         {
             LUXOR__SCHEDULE(&priv->napi, ndev);
+			printk(KERN_ERR "LUXOR__SCHEDULE_PREP : %i\n", isr);
             RET(IRQ_HANDLED);
         }
         else
@@ -886,6 +889,7 @@ static irqreturn_t bdx_isr_napi(int irq, void *dev)
 			*/
             READ_REG(priv, regTXF_WPTR_0);
             READ_REG(priv, regRXD_WPTR_0);
+			printk(KERN_ERR "!!!!LUXOR__SCHEDULE_PREP : %i\n", isr);
         }
     }
 
@@ -1022,15 +1026,25 @@ static irqreturn_t bdx_isr_napi(int irq, void *dev, struct pt_regs *regs)
 static int bdx_poll(struct napi_struct *napi, int budget)
 {
     struct bdx_priv *priv = container_of(napi, struct bdx_priv, napi);
-    int work_done;
+    int work_done = 0;
     DEF_TIMER(bdx_poll);
 
     START_TIMER(bdx_poll);
     ENTER;
 
     bdx_tx_cleanup(priv);
-
-    work_done = bdx_rx_receive(priv, &priv->rxd_fifo0, budget);
+	printk(KERN_ERR "xBudget : %i-%i\n", budget, priv->rx_raw);
+	if(priv->rx_raw){
+		//printk(KERN_ERR "pBudget : %i\n", budget);
+		#ifndef USE_PAGED_BUFFERS
+		//work_done = bdx_rx_receive_raw(priv, &priv->rxd_fifo0, bdx_rx_raw_get_quota(priv));
+		work_done = 0;
+		//printk(KERN_ERR "WD : %i\n", work_done);
+		#endif
+	}else{
+		 work_done = bdx_rx_receive(priv, &priv->rxd_fifo0, budget);
+	}
+	
     if (work_done < budget)
     {
         napi_complete(napi);
@@ -1043,11 +1057,19 @@ static int bdx_poll(struct napi_struct *napi, int budget)
 static int bdx_poll(struct napi_struct *napi, int budget)
 {
     struct bdx_priv *priv = container_of(napi, struct bdx_priv, napi);
-    int work_done;
+    int work_done = 0;
 
     ENTER;
     bdx_tx_cleanup(priv);
-    work_done = bdx_rx_receive(priv, &priv->rxd_fifo0, budget);
+	
+	if(priv->rx_raw){
+		#ifndef USE_PAGED_BUFFERS
+		work_done = bdx_rx_receive_raw(priv, &priv->rxd_fifo0, min(budget, bdx_rx_raw_get_quota(priv)));
+		#endif
+	}else{
+		work_done = bdx_rx_receive(priv, &priv->rxd_fifo0, budget);
+	}
+   
     if (work_done < budget)
     {
         netif_rx_complete(priv->ndev, napi);
@@ -1059,14 +1081,24 @@ static int bdx_poll(struct napi_struct *napi, int budget)
 static int bdx_poll(struct net_device *ndev, int *budget_p)
 {
     struct bdx_priv *priv = ndev->priv;
-    int work_done;
+    int work_done = 0;
 
     ENTER;
     bdx_tx_cleanup(priv);
-    work_done          = bdx_rx_receive(priv, &priv->rxd_fifo0,
-                                        min(*budget_p, priv->ndev->quota));
-    *budget_p         -= work_done;
-    priv->ndev->quota -= work_done;
+	
+	if(priv->rx_raw){
+		#ifndef USE_PAGED_BUFFERS
+		work_done          = bdx_rx_receive_raw(priv, &priv->rxd_fifo0, min(*budget_p, bdx_rx_raw_get_quota(priv)));
+		#endif
+	}else{
+		work_done          = bdx_rx_receive(priv, &priv->rxd_fifo0, min(*budget_p, priv->ndev->quota));
+	}
+	
+	if(!priv->rx_raw){
+		*budget_p         -= work_done;
+		priv->ndev->quota -= work_done;
+	}
+	
     if (work_done < *budget_p)
     {
         DBG("rx poll is done. backing to isr-driven\n");
@@ -4513,14 +4545,16 @@ int chrdev_init(struct bdx_priv *priv, char * name)
 		return -1;
 	}
 	
-	priv->chrdev_current_rx_buffer = 'A';
+	priv->chrdev_current_rx_buffer = priv->chrdev_rx_buffer_A;
 	priv->chrdev_device_open = false;
 	priv->chrdev_minor = minor;
 	priv->chrdev_major = raw_dev_major;
-	spin_lock_init(&priv->chrdev_write_lock);
-	spin_lock_init(&priv->chrdev_read_lock);
+	spin_lock_init(&priv->chrdev_tx_lock);
+	spin_lock_init(&priv->chrdev_rx_lock);
+	spin_lock_init(&priv->chrdev_rxswap_lock);
 	
 	init_waitqueue_head(&priv->tx_queue);
+	init_waitqueue_head(&priv->rx_queue);
 	return minor;
 }
 
@@ -4565,6 +4599,7 @@ int chrdev_open(struct inode *inode, struct file *file)
 	}
 	priv->chrdev_device_open = true;
 	priv->rx_raw = true;
+	printk(KERN_ERR "Puting eth1 raw\n");
 	return 0;
 }
 
@@ -4587,6 +4622,10 @@ int chrdev_release(struct inode *inode, struct file *file)
 ssize_t chrdev_read(struct file *filp, char *buffer, size_t length, loff_t * offset)
 {
 	struct bdx_priv *priv;
+	struct bulk_trx_d * trx_d;
+	int copy_result;
+	unsigned actual_length;
+	
 	unsigned int minor = iminor(filp->f_inode);
 	
 	if(minor > MAX_NO_ETH_ADAPTERS || adapter_priv[minor] == NULL){
@@ -4595,16 +4634,39 @@ ssize_t chrdev_read(struct file *filp, char *buffer, size_t length, loff_t * off
 	
 	priv = adapter_priv[minor];
 	
-	/*unsigned actual_length =  MIN(skb_data_len, MAX_KERNEL_BUFFER_SIZE);
+	bdx_tx_cleanup(priv);
+	int work_done = bdx_rx_receive_raw(priv, &priv->rxd_fifo0, bdx_rx_raw_get_quota(priv));
 	
-	spin_lock(&read_lock);
+	spin_lock(&priv->chrdev_rx_lock);
 	
-	copy_result = copy_to_user(buffer, kernel_buffer, actual_length);
+	spin_lock(&priv->chrdev_rxswap_lock);
 	
-	spin_unlock(&read_lock);
-	return actual_length;*/
+	printk(KERN_ERR "Read request : size-%i, WD: %i\n", length, work_done);
+	if(priv->chrdev_current_rx_buffer == priv->chrdev_rx_buffer_A){
+		trx_d = (struct bulk_trx_d *) priv->chrdev_rx_buffer_A;
+		priv->chrdev_current_rx_buffer = priv->chrdev_rx_buffer_B;
+		priv->chrdev_current_rx_buffer->no_frames = 0;
+		printk(KERN_ERR "Read request : reading on A, write to B, available : %i\n", trx_d->no_frames);
+	}else{
+		trx_d = (struct bulk_trx_d *) priv->chrdev_rx_buffer_B;
+		priv->chrdev_current_rx_buffer = priv->chrdev_rx_buffer_A;
+		priv->chrdev_current_rx_buffer->no_frames = 0;
+		printk(KERN_ERR "Read request : reading on B, write to A, available : %i\n", trx_d->no_frames);
+	}
+	spin_unlock(&priv->chrdev_rxswap_lock);
 	
-	return 0;
+	if(trx_d->no_frames == 0){
+		spin_unlock(&priv->chrdev_rx_lock);
+		return 0;
+	}
+	
+	actual_length =  MIN(length, trx_d->no_frames*RAW_ACCESS_MAX_FRAME_SIZE + 4 + RAW_ACCESS_TRX_MAX_FRAMES*sizeof(short));
+	printk(KERN_ERR "Read request : actual length %i\n", actual_length);
+	copy_result = copy_to_user(buffer, trx_d, actual_length);
+	
+	spin_unlock(&priv->chrdev_rx_lock);
+	
+	return actual_length;
 }
 
 ssize_t chrdev_write(struct file *filp, const char *buff, size_t len, loff_t * off)
@@ -4628,7 +4690,7 @@ ssize_t chrdev_write(struct file *filp, const char *buff, size_t len, loff_t * o
 	
 	priv = adapter_priv[minor];
 
-	spin_lock(&priv->chrdev_write_lock);
+	spin_lock(&priv->chrdev_tx_lock);
 	
 	copy_result = copy_from_user(priv->chrdev_tx_buffer, buff, len);
 	
@@ -4642,13 +4704,13 @@ ssize_t chrdev_write(struct file *filp, const char *buff, size_t len, loff_t * o
 		return -EINVAL;
 	}
 	
-	frame_ptr = trx_desc->frame_payload;
+	frame_ptr = (char *) trx_desc->frame_payload;
 	
 	DBG("%s: %s Sending %i frames\n", BDX_DRV_NAME, priv->ndev->name, trx_desc->no_frames);
 	
 	for(i=0;i<trx_desc->no_frames;i++){
 		frame_size = trx_desc->frame_size[i];
-		frame_ptr = &trx_desc->frame_payload[i];
+		frame_ptr = (char *) &trx_desc->frame_payload[i];
 		if(frame_size > 0 && frame_size < RAW_ACCESS_MAX_FRAME_SIZE && (frame_bytes_read + frame_size) < len){
 			
 			wait_event_interruptible(priv->tx_queue, (priv->tx_wait == false));
@@ -4660,7 +4722,7 @@ ssize_t chrdev_write(struct file *filp, const char *buff, size_t len, loff_t * o
 		}
 	}
 	
-	spin_unlock(&priv->chrdev_write_lock);
+	spin_unlock(&priv->chrdev_tx_lock);
 	
 	return len;
 }
@@ -4796,25 +4858,224 @@ static inline void bdx_tx_map_raw(struct bdx_priv *priv, char * raw_data, int le
 	bdx_tx_db_inc_wptr(db);
 }
 
-static int bdx_rx_copy_raw_packet(struct bdx_priv *priv, char * pkt, int len){
-	struct bulk_trx_d * trx_d;
-	if(priv->chrdev_current_rx_buffer == 'A'){
-		trx_d = (struct bulk_trx_d *) priv->chrdev_rx_buffer_A;
-	}else{
-		trx_d = (struct bulk_trx_d *) priv->chrdev_rx_buffer_B;
+#ifndef USE_PAGED_BUFFERS
+
+static int bdx_rx_receive_raw(struct bdx_priv *priv, struct rxd_fifo *f, int budget)
+{
+	printk(KERN_ERR "bdx_rx_receive_raw: %i\n", budget);
+	struct sk_buff *skb;
+	struct rxd_desc *rxdd;
+	struct rx_map *dm;
+	struct rxf_fifo *rxf_fifo;
+	int tmp_len, size;
+	int done = 0;
+	struct rxdb *db = NULL;
+	/* Unmarshalled descriptor - copy of descriptor in host order */
+	u32 rxd_val1, rxd_err;
+	u16 len;
+	u16 rxd_vlan;
+
+	priv->ndev->last_rx = jiffies;
+	f->m.wptr	   = READ_REG(priv, f->m.reg_WPTR) & TXF_WPTR_WR_PTR;
+	size = f->m.wptr - f->m.rptr;
+	if (size < 0)
+		size += f->m.memsz;	 /* Size is negative :-) */
+
+	while (size > 0)
+	{
+
+		rxdd = (struct rxd_desc *)(f->m.va + f->m.rptr);
+		db   = priv->rxdb0;
+
+		/*
+		 * Note: We have a chicken and egg problem here. If the
+		 *	   descriptor is wrapped we first need to copy the tail
+		 *	   of the descriptor to the end of the buffer before
+		 *	   extracting values from the descriptor. However in
+		 *	   order to know if the descriptor is wrapped we need to
+		 *	   obtain the length of the descriptor from (the
+		 *	   wrapped) descriptor. Luckily the length is the first
+		 *	   word of the descriptor. Descriptor lengths are
+		 *	   multiples of 8 bytes so in case of a wrapped
+		 *	   descriptor the first 8 bytes guaranteed to appear
+		 *	   before the end of the buffer. We first obtain the
+		 *	   length, we then copy the rest of the descriptor if
+		 *	   needed and then extract the rest of the values from
+		 *	   the descriptor.
+		 *
+		 *   Do not change the order of operations as it will
+		 *	   break the code!!!
+		 */
+		rxd_val1 = CPU_CHIP_SWAP32(rxdd->rxd_val1);
+		tmp_len  = GET_RXD_BC(rxd_val1) << 3;
+		BDX_ASSERT(tmp_len <= 0);
+		size	-= tmp_len;
+
+		/* CHECsK FOR A PARTIALLY ARRIVED DESCRIPTOR */
+
+		if (size < 0)
+		{
+			break;
+		}
+
+		/* HAVE WE REACHED THE END OF THE QUEUE? */
+
+		f->m.rptr += tmp_len;
+		tmp_len	= f->m.rptr - f->m.memsz;
+
+		if (unlikely(tmp_len >= 0))
+		{
+			f->m.rptr = tmp_len;
+			if (tmp_len > 0)
+			{
+
+				/* COPY PARTIAL DESCRIPTOR TO THE END OF
+				   THE QUEUE */
+
+				DBG("wrapped desc rptr=%d tmp_len=%d\n",
+					f->m.rptr, tmp_len);
+				memcpy(f->m.va + f->m.memsz, f->m.va, tmp_len);
+			}
+		}
+		dm   = bdx_rxdb_addr_elem(db, rxdd->va_lo);
+		prefetch(dm);
+		len  = CPU_CHIP_SWAP16(rxdd->len);
+		rxd_vlan = CPU_CHIP_SWAP16(rxdd->rxd_vlan);
+		print_rxdd(rxdd, rxd_val1, len, rxd_vlan);
+		
+		/* CHECK FOR ERRORS */
+		if (unlikely(rxd_err = GET_RXD_ERR(rxd_val1)))
+		{
+			int bErr = 1;
+
+			if (	( !	( rxd_err &  0x4))		&& 				// NOT CRC error
+					(
+						( rxd_err == 0x8) 		||				// UDP checksum error
+						((rxd_err == 0x10) && (len == 60))		// TCP checksum error
+					)
+		  		)
+			{
+				char *pkt;
+				
+				pkt = db->pkt;
+				skb_copy_from_linear_data(dm->skb, pkt, len);
+				printk(KERN_ERR "D: %i\n", len);
+				
+				bErr = bdx_rx_error(pkt, rxd_err, len);
+			}
+			if (bErr)
+			{
+//				char *pkt = ((char *)page_address(dm->page) +  dm->off);
+//				int i;
+//				ERR("RX: len=%d\n",len);
+//				for(i=0; i<len; i=i+16) ERR("%.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x %.2x ",(0xff&pkt[i]),(0xff&pkt[i+1]),(0xff&pkt[i+2]),(0xff&pkt[i+3]),(0xff&pkt[i+4]),(0xff&pkt[i+5]),(0xff&pkt[i+6]),(0xff&pkt[i+7]),(0xff&pkt[i+8]),(0xff&pkt[i+9]),(0xff&pkt[i+10]),(0xff&pkt[i+11]),(0xff&pkt[i+12]),(0xff&pkt[i+13]),(0xff&pkt[i+14]),(0xff&pkt[i+15]));
+//				ERR("\n");
+				WRN("rxd_err = 0x%x\n", rxd_err);
+				priv->net_stats.rx_errors++;
+				bdx_recycle_skb(priv, rxdd);
+				continue;
+			}
+		}
+
+		rxf_fifo = &priv->rxf_fifo0;
+		
+		{
+			printk(KERN_ERR "RX-RAW P: %i\n", len);
+			/* Handle SKB */
+			skb = dm->skb;
+			prefetch(skb);
+			prefetch(skb->data);
+
+			/* IS THIS A SMALL PACKET? */
+
+			//if (len < BDX_COPYBREAK && (skb2 = dev_alloc_skb(len + NET_IP_ALIGN)))
+			//{
+
+				/* YES, COPY PACKET TO A SMALL SKB AND REUSE
+				   THE CURRENT SKB */
+
+				//skb_reserve(skb2, NET_IP_ALIGN);
+				
+				pci_dma_sync_single_for_cpu(priv->pdev,
+											dm->dma,
+											rxf_fifo->m.pktsz,
+											PCI_DMA_FROMDEVICE);
+				
+				bdx_rx_copy_raw_packet(priv, skb->data, len);
+				bdx_recycle_skb(priv, rxdd);
+				
+				//skb = skb2;
+			//}
+//			else
+//			{
+//				/* NO, UNMAP THE SKB AND FREE THE FIFO ELEMENT */
+//				pci_unmap_single(priv->pdev,
+//								 dm->dma, rxf_fifo->m.pktsz,
+//								 PCI_DMA_FROMDEVICE);
+//				bdx_rxdb_free_elem(db, rxdd->va_lo);
+//			}
+
+			/* UPDATE SKB FIELDS */
+
+			//skb_put(skb, len);
+			//skb->dev	   = priv->ndev;
+			
+			/*
+			 * Note: Non-IP packets aren't checksum-offloaded.
+			 */
+			/*skb->ip_summed = GET_RXD_PKT_ID(rxd_val1) == 0 ?
+							 CHECKSUM_NONE : CHECKSUM_UNNECESSARY;
+			skb->protocol  = eth_type_trans(skb, priv->ndev);*/
+			
+			//LUXOR__RECEIVE(&priv->napi, skb);
+		}
+
+		priv->net_stats.rx_bytes += len;
+
+		if (unlikely(++done >= budget))
+			break;
 	}
+
+	/* CLEANUP */
+	LUXOR__GRO_FLUSH(&priv->napi);
+	priv->net_stats.rx_packets += done;
+
+	/* FIXME: Do something to minimize pci accesses	*/
+	WRITE_REG(priv, f->m.reg_RPTR, f->m.rptr & TXF_WPTR_WR_PTR);
 	
-	if(trx_d->no_frames < RAW_ACCESS_TRX_MAX_FRAMES){
-		memcpy(&trx_d->frame_payload[trx_d->no_frames], pkt, len);
-		trx_d->frame_size[trx_d->no_frames] = len;
-		trx_d->no_frames++;
+	bdx_rx_alloc_buffers(priv, priv->rxdb0, &priv->rxf_fifo0);
+	
+	RET(done);
+}
+
+static int bdx_rx_raw_get_quota(struct bdx_priv *priv){
+	
+	int no_frames;
+	spin_lock(&priv->chrdev_rxswap_lock);
+	no_frames = RAW_ACCESS_TRX_MAX_FRAMES - priv->chrdev_current_rx_buffer->no_frames;
+	spin_unlock(&priv->chrdev_rxswap_lock);
+	return no_frames;
+}
+
+static int bdx_rx_copy_raw_packet(struct bdx_priv *priv, char * pkt, int len){
+	
+	spin_lock(&priv->chrdev_rxswap_lock);
+
+	if(priv->chrdev_current_rx_buffer->no_frames < RAW_ACCESS_TRX_MAX_FRAMES){
+		memcpy(&priv->chrdev_current_rx_buffer->frame_payload[priv->chrdev_current_rx_buffer->no_frames], pkt, len);
+		priv->chrdev_current_rx_buffer->frame_size[priv->chrdev_current_rx_buffer->no_frames] = len;
+		priv->chrdev_current_rx_buffer->no_frames++;
+		
+		spin_unlock(&priv->chrdev_rxswap_lock);
 		
 		return 1;
 	}
 	
+	spin_unlock(&priv->chrdev_rxswap_lock);
 	return -1;
 }
 
+#endif
 
 module_exit(bdx_module_exit);
 

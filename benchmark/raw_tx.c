@@ -18,6 +18,7 @@
 
 #include "common.h"
 #include "frame_generator.h"
+#include "bulk_trxd.h"
 
 #define MY_DEST_MAC0	0xb0
 #define MY_DEST_MAC1	0xc5
@@ -25,15 +26,6 @@
 #define MY_DEST_MAC3	0xff
 #define MY_DEST_MAC4	0xf3
 #define MY_DEST_MAC5	0xb1
-
-#define RAW_ACCESS_TRX_MAX_FRAMES	100
-#define RAW_ACCESS_MAX_FRAME_SIZE	1514
-
-struct bulk_trx_d{
-	int no_frames;
-	short frame_size[RAW_ACCESS_TRX_MAX_FRAMES];
-	char frame_payload[RAW_ACCESS_TRX_MAX_FRAMES][RAW_ACCESS_MAX_FRAME_SIZE];
-};
 
 
 int send_raw_ether_frame(bool direct){
